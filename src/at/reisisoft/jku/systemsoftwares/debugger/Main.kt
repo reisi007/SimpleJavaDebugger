@@ -2,13 +2,15 @@ package at.reisisoft.jku.systemsoftwares.debugger;
 
 import com.sun.jdi.*
 import com.sun.jdi.event.*
-import com.sun.jdi.request.EventRequestManager
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.nio.file.Paths
 
 object Main {
     val menuOptions = MenuOption.values().asList()
+
+    var vm: VirtualMachine? = null;
+    val input = BufferedReader(InputStreamReader(System.`in`))
 
     private fun BufferedReader.getIntInPositiveRange(): Int {
         return getIntInRange(0, Integer.MAX_VALUE)
@@ -28,6 +30,7 @@ object Main {
 
     @JvmStatic
     fun main(args: Array<String>) {
+
         val programToDebug = if (args.isNotEmpty()) args[0] else defaultClassName
 
         val con = Bootstrap.virtualMachineManager().launchingConnectors()[0]
@@ -46,49 +49,75 @@ object Main {
         arguments.get("options")?.setValue("-classpath $cp")
         println(arguments)
 
-        val vm = con.launch(arguments)
-        val vmProcess = vm.process()
+        vm = con.launch(arguments)
+        val vmProcess = vm?.process() ?: throw IllegalStateException()
 
         Redirection(vmProcess.errorStream, System.err).start()
         Redirection(vmProcess.inputStream, System.out).start()
 
+        vm?.let { vm ->
+            val eventRequestManager = vm.eventRequestManager()
+            val methodEntryRequest = eventRequestManager.createMethodEntryRequest()
+            methodEntryRequest.addClassFilter(programToDebug)
+            methodEntryRequest.enable()
 
-        //Normal program flow
-        var curOption: MenuOption;
-        BufferedReader(InputStreamReader(System.`in`)).use { input ->
-            do {// Handle events
-                val requestManager = vm.eventRequestManager()
-                val eventQueue: EventQueue? = vm.eventQueue()
-                eventQueue?.let { handleEvents(it) }
-                printMenu()
-                //normal program flow
-                curOption = getMenuOptionFromInt(input.getIntInRange(0, menuOptions.size))
-                when (curOption) {
-                    MenuOption.EXIT -> println("Goodbye!")
-                    MenuOption.START_DEBUGGEE -> vm.resume()
-                    MenuOption.BREAKPOINT_SET -> setBreakpoint(input, requestManager, vm)
-                    else -> TODO("Option $curOption is not supported")
+            vm.resume() // Will resume until method entry of main method
 
-                }
-                //Set event handler
-                vm.eventQueue()
-
-            } while (curOption != MenuOption.EXIT)
-        }
-        System.exit(0)
+            val eventQueue = vm.eventQueue()
+            while (true) {
+                handleEvents(eventQueue)
+            }
+        } ?: throw IllegalStateException("VM must not be null")
     }
 
     private fun handleEvents(eventQueue: EventQueue) {
-        val eventSet: EventSet = eventQueue.remove(50)
+        val eventSet: EventSet = eventQueue.remove()
         for (event in eventSet) {
             when (event) {
-                is VMStartEvent -> println("Started debugging!")
-                is VMDeathEvent -> println("Debugee VM died")
-                is BreakpointEvent -> handleBreakPoint(event)
+                is VMStartEvent ->
+                    println("Started debugging!")
+                is MethodEntryEvent -> menu()
+                is VMDisconnectEvent -> {
+                    println("== Debugee terminated ==")
+                    System.exit(0)
+                }
+                is VMDeathEvent -> println(" == Debugee VM died ==")
+                is BreakpointEvent -> {
+                    handleBreakPoint(event)
+                    menu()
+                }
                 else -> TODO("Event handler for event ${event.javaClass} does not exist!")
             }
         }
     }
+
+    private fun menu() {
+        //Normal program flow
+        var curOption: MenuOption? = null
+        input.use { input ->
+            do {// Handle events
+                vm?.let { vm ->
+
+                    printMenu()
+                    //normal program flow
+                    curOption = getMenuOptionFromInt(input.getIntInRange(0, menuOptions.size))
+                    when (curOption) {
+                        MenuOption.EXIT -> {
+                            println("Goodbye!")
+                            System.exit(0)
+                        }
+                        MenuOption.RUN_TO_BREAKPOINT -> vm.resume()
+                        MenuOption.BREAKPOINT_SET -> setBreakpoint(input, vm)
+                        else -> TODO("Option $curOption is not supported")
+
+                    }
+                    //Set event handler
+                    vm.eventQueue()
+                }
+            } while (curOption != MenuOption.RUN_STEP && curOption != MenuOption.RUN_TO_BREAKPOINT)
+        }
+    }
+
 
     private fun printMenu() {
         println("Welcome to Debugger for Java Version -2")
@@ -127,13 +156,10 @@ object Main {
     }
 
     private val defaultClassName = "at.testitest.Test"
-    private fun setBreakpoint(input: BufferedReader, requestManager: EventRequestManager, vm: VirtualMachine) {
+    private fun setBreakpoint(input: BufferedReader, vm: VirtualMachine) {
         vm.allClasses().stream().map { it.javaClass.name }.filter { it.startsWith("at") }.forEach { System.out.println(it) }
         print("In which class should the breakpoint be set? [$defaultClassName]: ")
-
         val line = input.readLine()
-        println("Available variables:")
-
         val finalClassName = (if (line.length == 0) defaultClassName else line).trim()
         println("Looking for methods in $finalClassName")
         try {
@@ -150,7 +176,7 @@ object Main {
 
                 if (location != null) {
                     success = true
-                    val breakpointRequest = requestManager.createBreakpointRequest(location)
+                    val breakpointRequest = vm.eventRequestManager().createBreakpointRequest(location)
                     breakpointRequest.enable()
                 } else {
                     success = false
