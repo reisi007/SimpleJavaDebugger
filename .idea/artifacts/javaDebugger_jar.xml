@@ -1,0 +1,12 @@
+<component name="ArtifactManager">
+  <artifact name="javaDebugger:jar">
+    <output-path>$PROJECT_DIR$/out/artifacts/javaDebugger_jar</output-path>
+    <root id="root">
+      <element id="archive" name="javaDebugger.jar">
+        <element id="module-output" name="javaDebugger" />
+      </element>
+      <element id="library" level="project" name="tools" />
+      <element id="library" level="project" name="KotlinJavaRuntime" />
+    </root>
+  </artifact>
+</component>

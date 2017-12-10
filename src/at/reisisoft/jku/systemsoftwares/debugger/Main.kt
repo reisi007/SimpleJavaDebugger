@@ -5,6 +5,7 @@ import com.sun.jdi.event.*
 import com.sun.jdi.request.EventRequestManager
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.nio.file.Paths
 
 object Main {
     val menuOptions = MenuOption.values().asList()
@@ -27,14 +28,23 @@ object Main {
 
     @JvmStatic
     fun main(args: Array<String>) {
-        val programToDebug = if (args.size > 0) args[0] else "at.testitest.Test"
+        val programToDebug = if (args.isNotEmpty()) args[0] else defaultClassName
 
-        val con = Bootstrap.virtualMachineManager().defaultConnector()
+        val con = Bootstrap.virtualMachineManager().launchingConnectors()[0]
 
         val arguments = con.defaultArguments()
 
         arguments.get("main")?.setValue(programToDebug)
                 ?: throw IllegalStateException("No \"main\" argument found!")
+        arguments.get("suspend")?.setValue("true")
+                ?: throw IllegalStateException("No \"suspend\" argument found!")
+
+        var cp = Paths.get("out").resolve("artifacts").resolve("javaDebugger_jar").toAbsolutePath().toString() + "\\*"
+
+        cp = '\"' + cp + '\"'
+        println("Classpath: " + cp)
+        arguments.get("options")?.setValue("-classpath $cp")
+        println(arguments)
 
         val vm = con.launch(arguments)
         val vmProcess = vm.process()
@@ -48,15 +58,15 @@ object Main {
         BufferedReader(InputStreamReader(System.`in`)).use { input ->
             do {// Handle events
                 val requestManager = vm.eventRequestManager()
-                val eventQueue = vm.eventQueue()
-                handleEvents(eventQueue)
+                val eventQueue: EventQueue? = vm.eventQueue()
+                eventQueue?.let { handleEvents(it) }
                 printMenu()
                 //normal program flow
                 curOption = getMenuOptionFromInt(input.getIntInRange(0, menuOptions.size))
                 when (curOption) {
                     MenuOption.EXIT -> println("Goodbye!")
                     MenuOption.START_DEBUGGEE -> vm.resume()
-
+                    MenuOption.BREAKPOINT_SET -> setBreakpoint(input, requestManager, vm)
                     else -> TODO("Option $curOption is not supported")
 
                 }
@@ -116,7 +126,41 @@ object Main {
         } else return value.toString()
     }
 
-    private fun setBreakpoint(input: BufferedReader, requestManager: EventRequestManager) {
+    private val defaultClassName = "at.testitest.Test"
+    private fun setBreakpoint(input: BufferedReader, requestManager: EventRequestManager, vm: VirtualMachine) {
+        vm.allClasses().stream().map { it.javaClass.name }.filter { it.startsWith("at") }.forEach { System.out.println(it) }
+        print("In which class should the breakpoint be set? [$defaultClassName]: ")
+
+        val line = input.readLine()
+        println("Available variables:")
+
+        val finalClassName = (if (line.length == 0) defaultClassName else line).trim()
+        println("Looking for methods in $finalClassName")
+        try {
+            val breakPointInClass = vm.classesByName(finalClassName)[0]
+            val allLineLocations: List<Location> = breakPointInClass.allLineLocations()
+            val fromLine = allLineLocations.first().lineNumber()
+            val toLine = allLineLocations.last().lineNumber()
+            println("Breakpoints can be set in lines between $fromLine and $toLine")
+            var success: Boolean;
+            do {
+                print("Line number [$fromLine..$toLine]: ")
+                val lineNumber = input.getIntInRange(fromLine, toLine + 1)
+                val location: Location? = allLineLocations.asSequence().filter { it.lineNumber() == lineNumber }.firstOrNull()
+
+                if (location != null) {
+                    success = true
+                    val breakpointRequest = requestManager.createBreakpointRequest(location)
+                    breakpointRequest.enable()
+                } else {
+                    success = false
+                }
+
+            } while (!success)
+
+        } catch (e: RuntimeException) {
+            println("Not able to set breakpoint: ${e.message}")
+        }
 
     }
 }
