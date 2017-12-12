@@ -1,7 +1,7 @@
 package at.reisisoft.jku.systemsoftwares.debugger
 
 enum class MenuOption {
-    BREAKPOINT_LIST,
+    BREAKPOINT_DELETE,
     BREAKPOINT_SET,
     RUN_TO_BREAKPOINT,
     RUN_STEP,

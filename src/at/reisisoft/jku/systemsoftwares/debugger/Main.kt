@@ -10,6 +10,11 @@ object Main {
     val menuOptions = MenuOption.values().asList()
 
     var vm: VirtualMachine? = null;
+
+    fun VirtualMachine.getMainThread(): ThreadReference? {
+        return this.allThreads().stream().filter { it.name() == "main" }.findAny().orElseGet { null }
+    }
+
     val input = BufferedReader(InputStreamReader(System.`in`))
 
     private fun BufferedReader.getIntInPositiveRange(): Int {
@@ -94,41 +99,53 @@ object Main {
     private fun menu() {
         //Normal program flow
         var curOption: MenuOption? = null
-        input.use { input ->
-            do {// Handle events
-                vm?.let { vm ->
+        do {// Handle events
+            vm?.let { vm ->
 
-                    printMenu()
-                    //normal program flow
-                    curOption = getMenuOptionFromInt(input.getIntInRange(0, menuOptions.size))
-                    when (curOption) {
-                        MenuOption.EXIT -> {
-                            println("Goodbye!")
-                            System.exit(0)
-                        }
-                        MenuOption.RUN_TO_BREAKPOINT -> vm.resume()
-                        MenuOption.BREAKPOINT_SET -> setBreakpoint(input, vm)
-                        else -> TODO("Option $curOption is not supported")
-
+                printMenu()
+                //normal program flow
+                curOption = getMenuOptionFromInt(input.getIntInRange(0, menuOptions.size))
+                when (curOption) {
+                    MenuOption.EXIT -> {
+                        println("Goodbye!")
+                        System.exit(0)
                     }
-                    //Set event handler
-                    vm.eventQueue()
+                    MenuOption.PRINT_STACKTRACE ->
+                        vm.getMainThread()?.let { printStackTrace(it.frames()) } ?: kotlin.run { Main.println("StackTrace not found") }
+                    MenuOption.RUN_TO_BREAKPOINT -> vm.resume()
+                    MenuOption.BREAKPOINT_SET -> setBreakpoint(input, vm)
+                    MenuOption.PRINT_VARIABLES -> vm.getMainThread()?.let {
+                        val frames = it.frames()
+                        frames.getOrNull(0)?.let { printVariables(it) }
+                    } ?: kotlin.run { println("No StackFrame found. Unable to print variables") }
+
+                    else -> TODO("Option $curOption is not supported")
+
                 }
-            } while (curOption != MenuOption.RUN_STEP && curOption != MenuOption.RUN_TO_BREAKPOINT)
-        }
+            }
+        } while (curOption != MenuOption.RUN_STEP && curOption != MenuOption.RUN_TO_BREAKPOINT)
+
     }
 
 
     private fun printMenu() {
+        for (i in 1..2) {
+            System.out.println()
+        }
         println("Welcome to Debugger for Java Version -2")
         println("Please choose one of the following commands to continue:")
         println()
-        menuOptions.forEach { println("${it.ordinal} --> $it") }
+        menuOptions.forEach { System.out.println("${it.ordinal} --> $it") }
         print("Your selection: ")
     }
 
     private fun getMenuOptionFromInt(ordinal: Int): MenuOption {
         return menuOptions.get(ordinal);
+    }
+
+    private fun printStackTrace(stackFrames: List<StackFrame>) {
+        stackFrames.forEach { System.out.println("${it.location()}, (Thread: ${it.thread().name()})") }
+
     }
 
     private fun handleBreakPoint(e: BreakpointEvent) {
@@ -151,7 +168,7 @@ object Main {
             val allFields = value.reflectedType().allFields()
             return value.getValues(allFields).map {
                 "${it.key.typeName()} ${it.key.name()} = ${valueAsString(it.value)}${System.lineSeparator()}"
-            }.joinToString(",", "${value.reflectedType().sourceName()} { ", " }")
+            }.joinToString(",", "${value.reflectedType().sourceName()}(${value.toString()}) { ", " }")
         } else return value.toString()
     }
 
@@ -183,10 +200,14 @@ object Main {
                 }
 
             } while (!success)
-
+            println("Breakpoint set successfully!")
         } catch (e: RuntimeException) {
             println("Not able to set breakpoint: ${e.message}")
         }
 
+    }
+
+    fun println(value: Any) {
+        System.out.println("== $value ==")
     }
 }

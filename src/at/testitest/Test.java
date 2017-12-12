@@ -4,8 +4,14 @@ public class Test {
 
     public static void main(String[] args) {
 
-        long a = System.currentTimeMillis();
+        long a = max(System.currentTimeMillis(), 100);
 
-        System.out.println("LongTime: " + a);
+        String b = "Test";
+
+        System.out.println("LongTime: " + a + ' ' + b);
+    }
+
+    private static long max(long a, long b) {
+        return a > b ? a : b;
     }
 }
