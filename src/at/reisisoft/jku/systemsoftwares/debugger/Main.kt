@@ -2,20 +2,23 @@ package at.reisisoft.jku.systemsoftwares.debugger;
 
 import com.sun.jdi.*
 import com.sun.jdi.event.*
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import com.sun.jdi.request.BreakpointRequest
+import com.sun.jdi.request.StepRequest
+import java.io.*
 import java.nio.file.Paths
+import java.util.*
+import kotlin.collections.ArrayList
 
 object Main {
-    val menuOptions = MenuOption.values().asList()
+    private val menuOptions = MenuOption.values().asList()
 
-    var vm: VirtualMachine? = null;
+    private val activeBreakpoints: MutableSet<BreakpointRequest> = TreeSet({ a, b -> a.location().compareTo(b.location()) })
 
     fun VirtualMachine.getMainThread(): ThreadReference? {
         return this.allThreads().stream().filter { it.name() == "main" }.findAny().orElseGet { null }
     }
 
-    val input = BufferedReader(InputStreamReader(System.`in`))
+    private val input = BufferedReader(InputStreamReader(System.`in`))
 
     private fun BufferedReader.getIntInPositiveRange(): Int {
         return getIntInRange(0, Integer.MAX_VALUE)
@@ -33,10 +36,12 @@ object Main {
         }
     }
 
+    private val defaultClassName = "at.testitest.Test"
+    private var programToDebug = ""
     @JvmStatic
     fun main(args: Array<String>) {
 
-        val programToDebug = if (args.isNotEmpty()) args[0] else defaultClassName
+        programToDebug = if (args.isNotEmpty()) args[0] else defaultClassName
 
         val con = Bootstrap.virtualMachineManager().launchingConnectors()[0]
 
@@ -54,79 +59,86 @@ object Main {
         arguments.get("options")?.setValue("-classpath $cp")
         println(arguments)
 
-        vm = con.launch(arguments)
+        val vm = con.launch(arguments)
         val vmProcess = vm?.process() ?: throw IllegalStateException()
 
         Redirection(vmProcess.errorStream, System.err).start()
         Redirection(vmProcess.inputStream, System.out).start()
 
-        vm?.let { vm ->
-            val eventRequestManager = vm.eventRequestManager()
-            val methodEntryRequest = eventRequestManager.createMethodEntryRequest()
-            methodEntryRequest.addClassFilter(programToDebug)
-            methodEntryRequest.enable()
 
-            vm.resume() // Will resume until method entry of main method
+        val eventRequestManager = vm.eventRequestManager()
+        val methodEntryRequest = eventRequestManager.createMethodEntryRequest()
+        methodEntryRequest.addClassFilter(programToDebug)
+        methodEntryRequest.enable()
 
-            val eventQueue = vm.eventQueue()
+        vm.resume() // Will resume until method entry of main method
+
+        val eventQueue = vm.eventQueue()
+        try {
             while (true) {
-                handleEvents(eventQueue)
+                handleEvents(eventQueue, vm)
             }
-        } ?: throw IllegalStateException("VM must not be null")
+        } catch (e: VMDisconnectedException) {
+            System.out.println("Debuggee finished execution during debugger menu. Sorry for the inconvenience!")
+        }
     }
 
-    private fun handleEvents(eventQueue: EventQueue) {
+    private fun handleEvents(eventQueue: EventQueue, vm: VirtualMachine) {
         val eventSet: EventSet = eventQueue.remove()
         for (event in eventSet) {
             when (event) {
                 is VMStartEvent ->
                     println("Started debugging!")
-                is MethodEntryEvent -> menu()
+                is MethodEntryEvent -> {
+                    vm.eventRequestManager().deleteEventRequest(event.request())
+                    menu(vm)
+                }
+                is StepEvent -> {
+                    handleStep(event, vm)
+                    menu(vm)
+                }
                 is VMDisconnectEvent -> {
-                    println("== Debugee terminated ==")
+                    println("Debugee terminated")
                     System.exit(0)
                 }
-                is VMDeathEvent -> println(" == Debugee VM died ==")
+                is VMDeathEvent -> println("Debugee VM died")
                 is BreakpointEvent -> {
                     handleBreakPoint(event)
-                    menu()
+                    menu(vm)
                 }
                 else -> TODO("Event handler for event ${event.javaClass} does not exist!")
             }
         }
     }
 
-    private fun menu() {
+    private fun menu(vm: VirtualMachine) {
         //Normal program flow
-        var curOption: MenuOption? = null
+        var curOption: MenuOption
         do {// Handle events
-            vm?.let { vm ->
-
-                printMenu()
-                //normal program flow
-                curOption = getMenuOptionFromInt(input.getIntInRange(0, menuOptions.size))
-                when (curOption) {
-                    MenuOption.EXIT -> {
-                        println("Goodbye!")
-                        System.exit(0)
-                    }
-                    MenuOption.PRINT_STACKTRACE ->
-                        vm.getMainThread()?.let { printStackTrace(it.frames()) } ?: kotlin.run { Main.println("StackTrace not found") }
-                    MenuOption.RUN_TO_BREAKPOINT -> vm.resume()
-                    MenuOption.BREAKPOINT_SET -> setBreakpoint(input, vm)
-                    MenuOption.PRINT_VARIABLES -> vm.getMainThread()?.let {
-                        val frames = it.frames()
-                        frames.getOrNull(0)?.let { printVariables(it) }
-                    } ?: kotlin.run { println("No StackFrame found. Unable to print variables") }
-
-                    else -> TODO("Option $curOption is not supported")
-
+            printMenu()
+            //normal program flow
+            curOption = getMenuOptionFromInt(input.getIntInRange(0, menuOptions.size))
+            when (curOption) {
+                MenuOption.EXIT -> {
+                    println("Goodbye!")
+                    System.exit(0)
                 }
+                MenuOption.BREAKPOINT_DELETE -> deleteBreakPoints(input, vm)
+                MenuOption.RUN_STEP -> vm.getMainThread()?.let { stepOver(it, vm) }
+                MenuOption.PRINT_STACKTRACE ->
+                    vm.getMainThread()?.let { printStackTrace(it.frames()) } ?: kotlin.run { Main.println("StackTrace not found") }
+                MenuOption.RUN_TO_BREAKPOINT -> {
+                    System.out.println("Run to next breakpoint")
+                    vm.resume()
+                }
+                MenuOption.BREAKPOINT_SET -> setBreakpoint(input, vm)
+                MenuOption.PRINT_VARIABLES -> vm.getMainThread()?.let {
+                    val frames = it.frames()
+                    frames.getOrNull(0)?.let { printVariables(it) }
+                } ?: kotlin.run { println("No StackFrame found. Unable to print variables") }
             }
         } while (curOption != MenuOption.RUN_STEP && curOption != MenuOption.RUN_TO_BREAKPOINT)
-
     }
-
 
     private fun printMenu() {
         for (i in 1..2) {
@@ -143,13 +155,48 @@ object Main {
         return menuOptions.get(ordinal);
     }
 
+    private fun stepOver(threadReference: ThreadReference, vm: VirtualMachine) {
+        val stepRequest = vm.eventRequestManager().createStepRequest(threadReference, StepRequest.STEP_LINE, StepRequest.STEP_OVER)
+        stepRequest.addCountFilter(1)
+        stepRequest.enable()
+        vm.resume()
+    }
+
     private fun printStackTrace(stackFrames: List<StackFrame>) {
         stackFrames.forEach { System.out.println("${it.location()}, (Thread: ${it.thread().name()})") }
 
     }
 
+    private fun deleteBreakPoints(input: BufferedReader, vm: VirtualMachine) {
+        println("Delete currently active breakpoints:")
+        System.out.println()
+        System.out.println("-1 -> exit this menu without deleting a breakpoint")
+        val breakpointRequestList: List<BreakpointRequest> = ArrayList(activeBreakpoints)
+        if (breakpointRequestList.size == 0)
+            System.out.println("No breakpoints are currently set")
+        else
+            breakpointRequestList.forEachIndexed { index, request ->
+                val location = request.location()
+                System.out.println("$index -> $location")
+            }
+        System.out.print("Your input: ")
+        val selection = input.getIntInRange(-1, activeBreakpoints.size)
+        breakpointRequestList.getOrNull(selection)?.let { requestToDelete ->
+            if (activeBreakpoints.remove(requestToDelete)) {
+                vm.eventRequestManager().deleteEventRequest(requestToDelete)
+                println("Deleted breakpoint at position ${requestToDelete.location()}")
+            } else throw IllegalAccessError("Non coherent state in breakpoints....")
+        } ?: kotlin.run { System.out.println("No breakpoint was deleted...") }
+    }
+
+    private fun handleStep(e: StepEvent, vm: VirtualMachine) {
+        println("[STEP] Location: ${e.location().lineNumber()} in ${e.location().method()}")
+        printVariables(e.thread().frame(0))
+        vm.eventRequestManager().deleteEventRequest(e.request())
+    }
+
     private fun handleBreakPoint(e: BreakpointEvent) {
-        println("[BREAKPOINT] Locatioon: ${e.location().lineNumber()} in ${e.location().method()}")
+        println("[BREAKPOINT] Location: ${e.location().lineNumber()} in ${e.location().method()}")
         printVariables(e.thread().frame(0))
     }
 
@@ -161,23 +208,20 @@ object Main {
 
     private fun valueAsString(value: Value): String {
         if (value is ArrayReference)
-            return value.values.joinToString(" , ", "Array [ ", " ]") {
-                valueAsString(it)
-            }
-        else if (value is ClassObjectReference && !(value is StringReference)) {
-            val allFields = value.reflectedType().allFields()
-            return value.getValues(allFields).map {
-                "${it.key.typeName()} ${it.key.name()} = ${valueAsString(it.value)}${System.lineSeparator()}"
-            }.joinToString(",", "${value.reflectedType().sourceName()}(${value.toString()}) { ", " }")
+            return value.values.joinToString(" , ", "Array [ ", " ]") { valueAsString(it) }
+        else if (value is ObjectReference && !(value is StringReference)) {
+            return value.getValues(value.referenceType().allFields()).map {
+                "${it.key.typeName()} ${it.key.name()} = ${valueAsString(it.value)};"
+            }.joinToString(" ", "${value.referenceType().sourceName()} { ", " }")
         } else return value.toString()
     }
 
-    private val defaultClassName = "at.testitest.Test"
+
     private fun setBreakpoint(input: BufferedReader, vm: VirtualMachine) {
         vm.allClasses().stream().map { it.javaClass.name }.filter { it.startsWith("at") }.forEach { System.out.println(it) }
-        print("In which class should the breakpoint be set? [$defaultClassName]: ")
+        print("In which class should the breakpoint be set? [$programToDebug]: ")
         val line = input.readLine()
-        val finalClassName = (if (line.length == 0) defaultClassName else line).trim()
+        val finalClassName = (if (line.length == 0) programToDebug else line).trim()
         println("Looking for methods in $finalClassName")
         try {
             val breakPointInClass = vm.classesByName(finalClassName)[0]
@@ -194,7 +238,12 @@ object Main {
                 if (location != null) {
                     success = true
                     val breakpointRequest = vm.eventRequestManager().createBreakpointRequest(location)
-                    breakpointRequest.enable()
+                    val addResult = activeBreakpoints.add(breakpointRequest)
+                    if (addResult)
+                        breakpointRequest.enable()
+                    else
+                        throw IllegalStateException("A breakpoint at this position already is set!")
+
                 } else {
                     success = false
                 }
@@ -207,7 +256,44 @@ object Main {
 
     }
 
-    fun println(value: Any) {
+    private fun println(value: Any) {
         System.out.println("== $value ==")
+    }
+}
+
+enum class MenuOption {
+    BREAKPOINT_DELETE,
+    BREAKPOINT_SET,
+    RUN_TO_BREAKPOINT,
+    RUN_STEP,
+    PRINT_STACKTRACE,
+    PRINT_VARIABLES,
+    EXIT;
+
+    override fun toString(): String {
+        return super.toString().replace('_', ' ').toLowerCase()
+    }
+}
+
+internal class Redirection(`is`: InputStream, os: OutputStream) : Thread() {
+    private val `in`: Reader
+    private val out: Writer
+
+    init {
+        `in` = InputStreamReader(`is`)
+        out = OutputStreamWriter(os)
+    }
+
+    override fun run() {
+        try {
+            val buf = CharArray(1024)
+            var n = `in`.read(buf, 0, 1024)
+            while (n >= 0) {
+                out.write(buf, 0, n)
+                n = `in`.read(buf, 0, 1024)
+            }
+            out.flush()
+        } catch (e: IOException) {
+        }
     }
 }

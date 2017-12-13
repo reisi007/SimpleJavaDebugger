@@ -5,10 +5,10 @@ public class Test {
     public static void main(String[] args) {
 
         long a = max(System.currentTimeMillis(), 100);
+        String c = "Hallo";
+        Example b = new Example();
 
-        String b = "Test";
-
-        System.out.println("LongTime: " + a + ' ' + b);
+        System.out.println("LongTime: " + a + ' ' + c);
     }
 
     private static long max(long a, long b) {
